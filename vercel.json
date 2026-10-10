@@ -1,5 +1,6 @@
 {
   "crons": [
+    {"path": "/api/cron/drain-queue", "schedule": "* * * * *"},
     {
       "path": "/api/cron/refresh-tokens",
       "schedule": "0 5 * * *"
