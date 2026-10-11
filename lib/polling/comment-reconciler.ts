@@ -191,6 +191,15 @@ async function sweepCampaign({
 
   const queue = getDMQueue();
 
+  // Backfill switch: campaigns named in SWEEP_IGNORE_OWNER_REPLIES (comma
+  // separated, case insensitive) still DM comments the owner already answered by
+  // hand. Dedup against DmLog below still applies, so nobody is DM'd twice.
+  const ignoreOwnerReplies = (process.env.SWEEP_IGNORE_OWNER_REPLIES ?? "")
+    .split(",")
+    .map((n) => n.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(automation.name.trim().toLowerCase());
+
   for (const mediaId of mediaIds) {
     let comments: InstagramComment[];
     try {
@@ -223,7 +232,7 @@ async function sweepCampaign({
       const ownerReplied = (c.replies?.data ?? []).some(
         (r) => r.from?.id === account.instagramId
       );
-      if (ownerReplied) {
+      if (ownerReplied && !ignoreOwnerReplies) {
         stat.alreadyReplied += 1;
         return false;
       }
