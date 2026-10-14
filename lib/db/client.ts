@@ -1,12 +1,13 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/app/generated/prisma/client";
+import { resolveRuntimeDatabaseUrl } from "@/lib/db/database-url";
 
 const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;
 };
 
 function createPrismaClient() {
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = resolveRuntimeDatabaseUrl();
   if (!databaseUrl) {
     throw new Error("DATABASE_URL environment variable is required");
   }
