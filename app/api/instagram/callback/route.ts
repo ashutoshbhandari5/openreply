@@ -10,6 +10,7 @@ import {
   verifyOAuthState,
 } from "@/lib/meta/oauth";
 import { canManageWorkspace } from "@/lib/workspace-access";
+import { requeueAuthFailures } from "@/lib/queue/recover-auth-failures";
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
@@ -96,6 +97,13 @@ export async function GET(request: NextRequest) {
         where: { id: existing.id, workspaceId: state.workspaceId, provider: 'META' }, data,
       });
       if (!updated.count) return NextResponse.redirect(`${baseUrl}/settings?instagram=already_connected`);
+      // A reconnect usually follows a dead session (code 190). Resend whatever
+      // failed while it was dead, so nobody is left waiting on their link.
+      try {
+        await requeueAuthFailures({ workspaceId: state.workspaceId, instagramAccountDbId: existing.id });
+      } catch (recoverError) {
+        console.warn("[Instagram Callback] Re-queue after reconnect failed:", recoverError);
+      }
     } else {
       await prisma.instagramAccount.create({ data: { ...data, workspaceId: state.workspaceId, instagramId, provider: 'META' } });
     }
