@@ -351,7 +351,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       existingLog.dmDeliveryUnconfirmed = true;
     }
 
-    const alreadyDmd = existingLog?.status === "SENT";
+    // SKIPPED_DEDUP is final for the DM leg: another comment or campaign
+    // already covered this person.
+    const alreadyDmd = existingLog?.status === "SENT" || existingLog?.status === "SKIPPED_DEDUP";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
     const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed &&
       (existingLog?.attempts ?? 0) < MAX_COMMENT_SEND_ATTEMPTS;
@@ -524,6 +526,45 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "SKIPPED_DEDUP",
           matchedKeyword: matchResult.matchedKeyword,
           errorMessage: `Another campaign (${privateReplyUsedBy.automation?.name ?? "unknown"}) already sent the one private reply Instagram allows for this comment`,
+        },
+      });
+      continue;
+    }
+
+    // One DM per person per campaign. Someone who comments twice ("🔥" then
+    // the keyword) used to get the follow prompt twice, which reads as spam.
+    // Their first comment's DM (or the link they already unlocked) covers
+    // them; the public reply above still goes out for this comment.
+    // A still-PENDING earlier comment counts too, but only when it is older
+    // than this one, so two comments in flight together can't both stand down.
+    const ownLog = await prisma.dmLog.findUnique({
+      where: { automationId_commentId: { automationId: automation.id, commentId } },
+      select: { createdAt: true },
+    });
+    const ownCreatedAt = ownLog?.createdAt ?? new Date();
+    const alreadyReachedPerson = await prisma.dmLog.findFirst({
+      where: {
+        automationId: automation.id,
+        commenterId,
+        commentId: { not: commentId },
+        OR: [
+          { status: "SENT" },
+          { dmDeliveryUnconfirmed: true },
+          {
+            status: "PENDING",
+            createdAt: { lt: ownCreatedAt, gt: new Date(Date.now() - 15 * 60_000) },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+    if (alreadyReachedPerson) {
+      await prisma.dmLog.update({
+        where: { automationId_commentId: { automationId: automation.id, commentId } },
+        data: {
+          status: "SKIPPED_DEDUP",
+          matchedKeyword: matchResult.matchedKeyword,
+          errorMessage: "Already sent this person a DM for this campaign",
         },
       });
       continue;
@@ -792,6 +833,12 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           ...(delivered ? { dmSentAt: new Date() } : {}),
           errorMessage: formatError(sendError),
           dmDeliveryUnconfirmed: isDeliveryUnconfirmed(sendError),
+          // A dead session (code 190) says nothing about this comment. Give the
+          // attempt back so the sweep keeps retrying until the account is
+          // reconnected, instead of giving up on these people after 3 tries.
+          ...(!delivered && sendError instanceof TokenExpiredError
+            ? { attempts: { decrement: 1 } }
+            : {}),
         },
       });
       throw sendError;
