@@ -233,9 +233,12 @@ beforeEach(() => {
   // check (keyed on status SENT) and the postback's name lookup. Only the
   // latter should resolve by default, or every comment would look like a
   // duplicate of an already-answered one.
+  // The one-DM-per-person check (an OR of states) must also find nothing.
   mockPrisma.dmLog.findFirst.mockImplementation(
-    async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+    async (args: { where?: { status?: string; OR?: unknown } } = {}) =>
+      args.where?.status === "SENT" || args.where?.OR
+        ? null
+        : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockReset().mockResolvedValue({});
@@ -1631,6 +1634,38 @@ describe("DM Worker — follow re-check acknowledgement", () => {
     );
   });
 
+  it("words each still-not-following reply differently and goes quiet after three", async () => {
+    const withHandle = { ...gated, instagramAccount: { ...gated.instagramAccount, username: "ashutoshwithclaude" } };
+    mockPrisma.automation.findFirst.mockResolvedValue(withHandle);
+    const incr = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(2).mockResolvedValueOnce(3).mockResolvedValueOnce(4);
+    vi.mocked(getRedisConnection).mockReturnValue({ set: mockRedisSet, incr, expire: vi.fn() } as never);
+
+    // followRecheckAttempt 2: the re-checks are spent, so this is a final "no".
+    for (let i = 0; i < 4; i++) {
+      await getProcessor()(createMockPostbackJob({ ...tap, followRecheckAttempt: 2, mid: `m${i}` }));
+    }
+
+    const texts = mockSendDirectMessageWithButton.mock.calls.map((call) => call[3] as string);
+    expect(texts).toHaveLength(3);
+    expect(new Set(texts).size).toBe(3);
+    expect(texts[0]).toContain("can't see your follow yet");
+    expect(texts[0]).toContain("@ashutoshwithclaude");
+    expect(texts[1]).toContain("instagram.com/ashutoshwithclaude");
+  });
+
+  it("tells someone who unlocked a link before that they unfollowed", async () => {
+    const withHandle = { ...gated, instagramAccount: { ...gated.instagramAccount, username: "ashutoshwithclaude" } };
+    mockPrisma.automation.findFirst.mockResolvedValue(withHandle);
+    vi.mocked(getRedisConnection).mockReturnValue({ set: mockRedisSet, incr: vi.fn().mockResolvedValue(1), expire: vi.fn() } as never);
+    mockPrisma.dmLog.findFirst.mockImplementation(async (args: { where?: { commentId?: unknown } } = {}) =>
+      args.where?.commentId ? { id: "earlier_reveal" } : { commenterName: "commenter_user" }
+    );
+
+    await getProcessor()(createMockPostbackJob({ ...tap, followRecheckAttempt: 2 }));
+
+    expect(mockSendDirectMessageWithButton.mock.calls[0][3]).toContain("not following anymore");
+  });
+
   it("acknowledges a burst of taps only once", async () => {
     mockRedisSet.mockResolvedValueOnce("OK").mockResolvedValueOnce(null);
 
@@ -1659,8 +1694,21 @@ describe("DM Worker — follow re-check acknowledgement", () => {
     );
   });
 
-  it("sends nothing extra when no acknowledgement message is configured", async () => {
+  it("sends the default acknowledgement when none is configured", async () => {
     delete process.env.FOLLOW_RECHECK_ACK_MESSAGE;
+
+    await getProcessor()(createMockPostbackJob(tap));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "Checking your follow, one sec ⏳"
+    );
+  });
+
+  it("sends nothing extra when the acknowledgement is turned off", async () => {
+    process.env.FOLLOW_RECHECK_ACK_MESSAGE = "";
 
     await getProcessor()(createMockPostbackJob(tap));
 
