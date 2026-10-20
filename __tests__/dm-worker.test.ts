@@ -1703,7 +1703,7 @@ describe("DM Worker — follow re-check acknowledgement", () => {
       "decrypted_token",
       "ig_456",
       "commenter_999",
-      "Checking your follow, one sec ⏳"
+      "Thanks so much! 🙏 Getting your link ready, give me a few seconds."
     );
   });
 
