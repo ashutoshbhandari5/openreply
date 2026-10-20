@@ -883,7 +883,7 @@ async function sendPostbackOnce({
   }
 }
 
-const DEFAULT_FOLLOW_RECHECK_ACK = "Checking your follow, one sec ⏳";
+const DEFAULT_FOLLOW_RECHECK_ACK = "Thanks so much! 🙏 Getting your link ready, give me a few seconds.";
 
 // How many times a person may be told "I can't see your follow" for one
 // campaign before the bot goes quiet for a day. Re-sending the identical prompt
