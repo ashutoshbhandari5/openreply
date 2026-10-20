@@ -722,10 +722,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           postId: mediaId,
         });
       } else if (sendFollowPrompt) {
+        // Someone who unlocked an earlier link and has since unfollowed gets
+        // told that, rather than the first-timer pitch.
+        const returning = await unlockedBefore(automation.instagramAccountId, commenterId);
         const promptText = renderMessageWithoutLink({
-          message:
-            automation.followPromptMessage ||
-            "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
+          message: returning
+            ? returningFollowerPrompt(automation.instagramAccount.username)
+            : automation.followPromptMessage ||
+              "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
           commenterName,
         });
         await sendPrivateReplyWithButton({
@@ -879,6 +883,61 @@ async function sendPostbackOnce({
   }
 }
 
+const DEFAULT_FOLLOW_RECHECK_ACK = "Checking your follow, one sec ⏳";
+
+// How many times a person may be told "I can't see your follow" for one
+// campaign before the bot goes quiet for a day. Re-sending the identical prompt
+// on every tap read as a broken bot (or a scam), so each rejection gets its own
+// wording and the loop has an end.
+const FOLLOW_REJECTION_REPLIES = 3;
+const FOLLOW_REJECTION_WINDOW_S = 24 * 60 * 60;
+
+async function countFollowRejection(automationId: string, userId: string): Promise<number> {
+  try {
+    const redis = getRedisConnection();
+    const key = `follow_reject:${automationId}:${userId}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, FOLLOW_REJECTION_WINDOW_S);
+    return count;
+  } catch {
+    return 1;
+  }
+}
+
+// Has this person already unlocked a follow-gated link from this account? If
+// they now read as not following, they followed for a link and unfollowed.
+async function unlockedBefore(instagramAccountDbId: string, userId: string): Promise<boolean> {
+  const hit = await prisma.dmLog.findFirst({
+    where: {
+      instagramAccountId: instagramAccountDbId,
+      commenterId: userId,
+      status: "SENT",
+      commentId: { startsWith: "reveal:" },
+    },
+    select: { id: true },
+  });
+  return Boolean(hit);
+}
+
+function returningFollowerPrompt(handle: string): string {
+  return `Hey {username}, good to see you again 🔥 Looks like you're not following anymore though. Follow @${handle} again, then tap the button and I'll send it over.`;
+}
+
+// The reply to a tap from someone who still doesn't follow. Null means stop
+// replying: they have been told enough times today.
+function followRejectionReply(count: number, returning: boolean, handle: string): string | null {
+  if (count > FOLLOW_REJECTION_REPLIES) return null;
+  if (count === 1) {
+    return returning
+      ? `Looks like you're not following anymore {username} 👀 Follow @${handle} again, then tap the button and it's yours.`
+      : `Hmm, I can't see your follow yet {username} 👀 Follow @${handle}, wait a few seconds, then tap the button again and it's yours.`;
+  }
+  if (count === 2) {
+    return `Still not seeing the follow {username}. Open instagram.com/${handle}, tap Follow, wait about 10 seconds, then tap the button below.`;
+  }
+  return `No stress {username}. Whenever you follow @${handle}, tap the button and I'll send it right over.`;
+}
+
 // Tells someone whose "I'm following" tap is being re-checked that it is being
 // looked at, so the chat does not sit silent while Instagram catches up with
 // the follow. Opt-in through FOLLOW_RECHECK_ACK_MESSAGE, and best-effort: it
@@ -896,7 +955,12 @@ async function sendFollowRecheckAck({
   userId: string;
   operationId: string | null;
 }): Promise<void> {
-  const message = process.env.FOLLOW_RECHECK_ACK_MESSAGE?.trim();
+  // On by default: without it the chat sits silent for up to a minute after a
+  // tap, and people tap again or assume the bot is broken. Set the variable to
+  // an empty string to turn it off.
+  const message = (
+    process.env.FOLLOW_RECHECK_ACK_MESSAGE ?? DEFAULT_FOLLOW_RECHECK_ACK
+  ).trim();
   if (!message) return;
   try {
     // One acknowledgement per re-check cycle: a burst of taps collapses into a
@@ -1097,10 +1161,24 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
           .catch(() => {});
       }
 
+      const handle = automation.instagramAccount.username;
+      let promptMessage =
+        automation.followPromptMessage ||
+        "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over";
+      const returning = await unlockedBefore(automation.instagramAccountId, userId);
+      if (!fromOpeningDm) {
+        // They tapped "I'm following" and still don't. Say so plainly instead of
+        // repeating the original prompt word for word.
+        const rejections = await countFollowRejection(automation.id, userId);
+        const reply = followRejectionReply(rejections, returning, handle);
+        if (reply === null) return;
+        promptMessage = reply;
+      } else if (returning) {
+        promptMessage = returningFollowerPrompt(handle);
+      }
+
       const promptText = renderMessageWithoutLink({
-        message:
-          automation.followPromptMessage ||
-          "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
+        message: promptMessage,
         commenterName,
       });
       try {
