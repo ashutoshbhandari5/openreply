@@ -16,7 +16,12 @@
 
 import Redis from "ioredis";
 
-const RATE_LIMIT_MAX = 750; // private replies per hour, per Meta's documented cap
+// Meta documents 750 private replies an hour, but an account sending anywhere
+// near that from one template gets its messaging disabled long before Meta's
+// API ever says no. Stay well under: 40 an hour unless DM_HOURLY_LIMIT says
+// otherwise. Over the cap, comments wait and retry instead of piling on.
+const RATE_LIMIT_MAX =
+  Number(process.env.DM_HOURLY_LIMIT) > 0 ? Number(process.env.DM_HOURLY_LIMIT) : 40;
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
