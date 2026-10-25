@@ -34,6 +34,9 @@ export interface ProcessCommentJob {
   // from. Campaigns are bound to that post, so both ids have to be matched.
   originalMediaId?: string;
   requeueAttempt?: number;
+  // Set by the campaign retry tool: this comment's earlier DM failed with an
+  // unconfirmed outcome, and the owner asked to try it once more.
+  retryUnconfirmed?: boolean;
   // Which path enqueued this comment. It is not copied to ProcessedComment or
   // used for reconciliation dedup.
   source?: CommentSource;
