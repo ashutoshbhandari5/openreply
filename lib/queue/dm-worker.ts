@@ -351,6 +351,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       existingLog.dmDeliveryUnconfirmed = true;
     }
 
+    // A retry the owner asked for: forget the earlier unconfirmed attempt so
+    // the DM goes out once more. Instagram refuses a second private reply to
+    // the same comment, so this can't double-send.
+    if (job.data.retryUnconfirmed && existingLog && existingLog.status === "FAILED") {
+      await prisma.dmLog.update({
+        where: { automationId_commentId: { automationId: automation.id, commentId } },
+        data: { dmDeliveryUnconfirmed: false, attempts: 0, errorMessage: null },
+      });
+      existingLog.dmDeliveryUnconfirmed = false;
+      existingLog.attempts = 0;
+    }
+
     // SKIPPED_DEDUP is final for the DM leg: another comment or campaign
     // already covered this person.
     const alreadyDmd = existingLog?.status === "SENT" || existingLog?.status === "SKIPPED_DEDUP";
