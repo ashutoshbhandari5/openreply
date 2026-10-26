@@ -1803,7 +1803,16 @@ it("retains the public reply claim if sending succeeded but its log write failed
   const { sendCommentReply } = await import("@/lib/meta/client");
   vi.mocked(sendCommentReply).mockResolvedValue({ id: "public-reply" });
   mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["Sent!"] }]);
-  mockPrisma.dmLog.update.mockRejectedValueOnce(new Error("Lost database connection after public send"));
+  // Fail only the write that records the public reply, which now runs after
+  // the DM's own SENT write.
+  let failedOnce = false;
+  mockPrisma.dmLog.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+    if (!failedOnce && "publicReplySentAt" in data) {
+      failedOnce = true;
+      throw new Error("Lost database connection after public send");
+    }
+    return {};
+  });
   const process = getProcessor();
   await process(createMockJob());
   expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ publicReplyDeliveryUnconfirmed: true }) }));
@@ -1811,4 +1820,82 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+describe("public reply waits for the DM", () => {
+  const withPublicReply = () =>
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["Check your DMs"] },
+    ]);
+
+  it("posts the public reply only after the DM went out", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    const order: string[] = [];
+    mockSendPrivateReply.mockImplementation(async () => { order.push("dm"); return { message_id: "m" }; });
+    mockSendPrivateReplyWithLinkButton.mockImplementation(async () => { order.push("dm"); return { message_id: "m" }; });
+    mockSendPrivateReplyWithButton.mockImplementation(async () => { order.push("dm"); return { message_id: "m" }; });
+    vi.mocked(sendCommentReply).mockImplementation(async () => { order.push("public"); return { id: "p" }; });
+    await getProcessor()(createMockJob());
+    expect(order).toEqual(["dm", "public"]);
+  });
+
+  it("holds the public reply while the DM waits on the hourly cap", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    mockReserveDMSlot.mockResolvedValue({
+      allowed: false, currentCount: 120, remainingDMs: 0, shouldRequeue: true,
+      requeueDelayMs: 1800000, shouldSkip: false, reserved: false,
+    });
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).not.toHaveBeenCalled();
+    expect(mockQueueAdd).toHaveBeenCalled();
+  });
+
+  it("holds the public reply when the cap skips the comment for now", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    mockReserveDMSlot.mockResolvedValue({
+      allowed: false, currentCount: 120, remainingDMs: 0, shouldRequeue: false,
+      requeueDelayMs: 0, shouldSkip: true, reserved: false,
+    });
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("posts no public reply when the DM send fails", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    const fail = new Error("boom");
+    mockSendPrivateReply.mockRejectedValue(fail);
+    mockSendPrivateReplyWithLinkButton.mockRejectedValue(fail);
+    mockSendPrivateReplyWithButton.mockRejectedValue(fail);
+    await expect(getProcessor()(createMockJob())).rejects.toBeDefined();
+    expect(sendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("catches up the public reply for a comment whose DM already went out", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "SENT", publicReplySentAt: null, publicReplyDeliveryUnconfirmed: false });
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).toHaveBeenCalledTimes(1);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+  });
+
+  it("posts no public reply for a comment whose DM is unconfirmed", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockReset().mockResolvedValue({ id: "public-reply" });
+    withPublicReply();
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", dmDeliveryUnconfirmed: true, publicReplySentAt: null, publicReplyDeliveryUnconfirmed: false });
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).not.toHaveBeenCalled();
+  });
 });
