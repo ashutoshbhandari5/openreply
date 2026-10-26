@@ -456,71 +456,83 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       update: {},
     });
 
-    // Public reply leg — decoupled from the DM and posted first so a DM failure
-    // (e.g. a non-follower whose messaging is restricted) never suppresses it.
-    // Idempotent across retries via publicReplySentAt.
+    // Public reply leg. Every reply in the pool says "check your DMs", so it
+    // only goes out once this person actually has a DM from the campaign: after
+    // this run's send succeeds, or when an earlier pass or comment already
+    // reached them. Posting it first meant that whenever the hourly DM cap was
+    // full, the comment section filled with "sent!" while the DMs sat in the
+    // queue for an hour or more, which reads as a lie to everyone scrolling.
+    // A rate-limited comment comes back (requeue or sweep) and gets its reply
+    // when its DM finally sends. Idempotent across retries via publicReplySentAt.
     const replyPool =
       automation.publicReplyMessages.length > 0
         ? automation.publicReplyMessages
         : automation.publicReplyMessage
           ? [automation.publicReplyMessage]
           : [];
-    if (
-      automation.publicReplyEnabled &&
-      replyPool.length > 0 &&
-      !existingLog?.publicReplySentAt &&
-      !existingLog?.publicReplyDeliveryUnconfirmed &&
-      await claimCommentDelivery(automation.id, commentId, "public")
-    ) {
-      try {
-        const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
-        const publicReply = renderMessageWithTracking({
-          message: chosen,
-          commenterName,
-          trackedLinks: automation.trackedLinks,
-        });
-        await sendCommentReply({
-          context: accessToken,
-          commentId: commentId,
-          message: publicReply,
-          postId: mediaId,
-        });
-        await prisma.dmLog.update({
-          where: {
-            automationId_commentId: { automationId: automation.id, commentId },
-          },
-          data: { publicReplySentAt: new Date(), publicReplyError: null, publicReplyDeliveryUnconfirmed: false },
-        });
-      } catch (error) {
-        console.error(
-          "[DM Worker] Public comment reply failed:",
-          formatError(error)
-        );
-        await prisma.dmLog
-          .update({
+    const postPublicReply = async () => {
+      if (
+        automation.publicReplyEnabled &&
+        replyPool.length > 0 &&
+        !existingLog?.publicReplySentAt &&
+        !existingLog?.publicReplyDeliveryUnconfirmed &&
+        await claimCommentDelivery(automation.id, commentId, "public")
+      ) {
+        try {
+          const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
+          const publicReply = renderMessageWithTracking({
+            message: chosen,
+            commenterName,
+            trackedLinks: automation.trackedLinks,
+          });
+          await sendCommentReply({
+            context: accessToken,
+            commentId: commentId,
+            message: publicReply,
+            postId: mediaId,
+          });
+          await prisma.dmLog.update({
             where: {
-              automationId_commentId: {
-                automationId: automation.id,
-                commentId,
-              },
+              automationId_commentId: { automationId: automation.id, commentId },
             },
-            data: { publicReplyError: formatError(classifySendError(error)), publicReplyDeliveryUnconfirmed: !isConfirmedSendRejection(error) },
-          })
-          .catch(() => {});
+            data: { publicReplySentAt: new Date(), publicReplyError: null, publicReplyDeliveryUnconfirmed: false },
+          });
+        } catch (error) {
+          console.error(
+            "[DM Worker] Public comment reply failed:",
+            formatError(error)
+          );
+          await prisma.dmLog
+            .update({
+              where: {
+                automationId_commentId: {
+                  automationId: automation.id,
+                  commentId,
+                },
+              },
+              data: { publicReplyError: formatError(classifySendError(error)), publicReplyDeliveryUnconfirmed: !isConfirmedSendRejection(error) },
+            })
+            .catch(() => {});
+        }
       }
-    }
+    };
 
-    // DM already sent on an earlier pass; the public reply retry above was all
-    // this run needed. Don't re-send the DM.
-    if (!needsDm) continue;
+    // Nothing left to send. If the person already has their DM (an earlier
+    // pass, or another comment of theirs), the public reply is all this run
+    // needs. A DM that failed or is unconfirmed gets no "check your DMs" reply.
+    if (!needsDm) {
+      if (alreadyDmd) await postPublicReply();
+      continue;
+    }
 
     // Meta allows exactly ONE private reply per comment, ever — across every
     // campaign. When several campaigns match the same comment (duplicated
     // campaigns, or an any-post campaign overlapping a post-specific one), only
     // the first can deliver; the rest would fail with "The comment is invalid
     // for a private reply". Skip them explicitly instead of burning an API call
-    // and logging a failure the user can do nothing about. The public reply
-    // above still goes out per campaign — only the DM leg is deduped.
+    // and logging a failure the user can do nothing about. The person did get
+    // that DM, so the public reply still goes out per campaign; only the DM leg
+    // is deduped.
     const privateReplyUsedBy = await prisma.dmLog.findFirst({
       where: {
         commentId,
@@ -540,13 +552,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: `Another campaign (${privateReplyUsedBy.automation?.name ?? "unknown"}) already sent the one private reply Instagram allows for this comment`,
         },
       });
+      await postPublicReply();
       continue;
     }
 
     // One DM per person per campaign. Someone who comments twice ("🔥" then
     // the keyword) used to get the follow prompt twice, which reads as spam.
     // Their first comment's DM (or the link they already unlocked) covers
-    // them; the public reply above still goes out for this comment.
+    // them, so this comment still gets its public reply.
     // A still-PENDING earlier comment counts too, but only when it is older
     // than this one, so two comments in flight together can't both stand down.
     const ownLog = await prisma.dmLog.findUnique({
@@ -579,6 +592,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: "Already sent this person a DM for this campaign",
         },
       });
+      await postPublicReply();
       continue;
     }
 
@@ -859,6 +873,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       });
       throw sendError;
     }
+
+    // The DM is out, so "check your DMs" is now true.
+    await postPublicReply();
   }
 }
 
