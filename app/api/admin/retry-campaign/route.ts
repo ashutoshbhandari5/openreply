@@ -6,9 +6,13 @@ import { getDMQueue } from "@/lib/queue/client";
 export const runtime = "nodejs";
 
 // Re-sends a campaign's comment DMs that never went out because Instagram had
-// the account's messaging switched off ("Service temporarily unavailable",
-// code 2). Those sends are marked unconfirmed, so nothing retries them on its
-// own.
+// the account's messaging switched off: "Service temporarily unavailable"
+// (code 2), or "The account owner has disabled access to Instagram Direct
+// Messaging" (the Connected tools toggle was off). Neither kind is retried on
+// its own once its attempts run out.
+//
+// offsetSeconds pushes this campaign's first send back, so retries for several
+// campaigns can be chained one after another instead of running side by side.
 //
 // It trickles them out instead of sending in bulk: one job every
 // RETRY_SPACING_MS (20 an hour), which leaves room under the worker's hourly
@@ -29,6 +33,9 @@ export async function POST(request: NextRequest) {
   if (!automationId) {
     return NextResponse.json({ success: false, error: "automationId is required" }, { status: 400 });
   }
+
+  const offsetMs =
+    Math.max(0, Number(request.nextUrl.searchParams.get("offsetSeconds")) || 0) * 1000;
 
   const automation = await prisma.automation.findFirst({
     where: { id: automationId, workspaceId, isActive: true },
@@ -55,6 +62,7 @@ export async function POST(request: NextRequest) {
       OR: [
         { status: "FAILED", errorMessage: { contains: "code=2]" } },
         { status: "FAILED", errorMessage: { contains: "code=2 " } },
+        { status: "FAILED", errorMessage: { contains: "disabled access to Instagram Direct Messaging" } },
       ],
     },
     orderBy: { createdAt: "asc" },
@@ -78,13 +86,13 @@ export async function POST(request: NextRequest) {
         source: "POLLING",
         retryUnconfirmed: true,
       },
-      { delay: queued * RETRY_SPACING_MS, jobId: `retry_${log.id}_${stamp}` },
+      { delay: offsetMs + queued * RETRY_SPACING_MS, jobId: `retry_${log.id}_${stamp}` },
     );
     queued += 1;
   }
 
   return NextResponse.json({
     success: true,
-    data: { queued, spacingSeconds: RETRY_SPACING_MS / 1000, finishesInMinutes: Math.ceil((queued * RETRY_SPACING_MS) / 60_000) },
+    data: { queued, spacingSeconds: RETRY_SPACING_MS / 1000, finishesInMinutes: Math.ceil((offsetMs + queued * RETRY_SPACING_MS) / 60_000) },
   });
 }
