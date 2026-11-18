@@ -35,6 +35,11 @@ export function resolveRuntimeDatabaseUrl(): string | undefined {
   // certificate isn't in Node's trust store. Keep TLS, skip CA verification.
   let url = setParam(raw, "supa", null);
   url = setParam(url, "pgbouncer", null);
+  // A DATABASE_URL on the pooler's session port (5432) is right for migrations
+  // but caps the whole app at 15 connections on the free plan, so serverless
+  // instances and the worker queue behind each other. Run the app on the same
+  // pooler's transaction port (6543) instead.
+  url = url.replace(/(pooler\.supabase\.com):5432(?=\/|$)/, "$1:6543");
   return setParam(url, "sslmode", "no-verify");
 }
 
