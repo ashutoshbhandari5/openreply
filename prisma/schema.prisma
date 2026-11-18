@@ -256,6 +256,9 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  @@index([workspaceId, createdAt])
+  @@index([automationId, createdAt])
+  @@index([instagramAccountId, createdAt])
 }
 
 // Legacy reconciliation model; currently unwired. Runtime code does not read
