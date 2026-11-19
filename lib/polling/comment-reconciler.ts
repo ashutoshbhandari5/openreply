@@ -318,6 +318,10 @@ async function sweepCampaign({
  * already asks for. The trade-off: an ad becomes visible to the sweep only once
  * a single comment on it has arrived. That is enough for the failure being
  * covered here, where some webhooks arrive and others do not.
+ *
+ * The scan unpacks every stored webhook payload, and it runs once per campaign
+ * on every sweep, so it only looks as far back as the sweep itself
+ * (LOOKBACK_HOURS). A 90-day window here pinned the free database's CPU.
  */
 export async function adMediaFor(postId: string): Promise<string[]> {
   try {
@@ -328,7 +332,7 @@ export async function adMediaFor(postId: string): Promise<string[]> {
            jsonb_array_elements(entry->'changes') change
       WHERE change->>'field' = 'comments'
         AND change->'value'->'media'->>'original_media_id' = ${postId}
-        AND w."createdAt" > now() - interval '90 days'
+        AND w."createdAt" > ${new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000)}
     `;
     return rows
       .map((r) => r.mediaId)
